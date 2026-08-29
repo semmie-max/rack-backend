@@ -36,9 +36,19 @@ async function sendEmail(to, subject, html) {
 
 const app = express();
 app.use(cors());
-app.use(express.json());const app = express();
-app.use(cors());
 app.use(express.json());
+
+async function createNotification(userEmail, title, desc) {
+  try {
+    const notifId = "notif_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    await pool.query(
+      "INSERT INTO notifications (id, user_email, title, description) VALUES (?, ?, ?, ?)",
+      [notifId, userEmail, title, desc]
+    );
+  } catch (err) {
+    console.error("Failed to create notification:", err);
+  }
+}
 
 function slugify(text) {
   return text
@@ -365,6 +375,12 @@ app.post("/api/forms/:id/responses", async (req, res) => {
 
     res.status(201).json({ message: "Response recorded." });
 
+    const notifTitle = votedCandidate ? "Contestant Voted" : "New Response Recorded";
+    const notifDesc = votedCandidate
+      ? `${voteCount || 1} vote${(voteCount || 1) !== 1 ? "s" : ""} received for ${votedCandidate}.`
+      : `${form.title} received a submission.`;
+    createNotification(form.user_email, notifTitle, notifDesc);
+
     // --- Fire and forget emails, don't block the response ---
     const answerRows = Object.entries(answers || {})
       .map(([qId, val]) => {
@@ -412,6 +428,37 @@ app.post("/api/forms/:id/responses", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to submit response." });
+  }
+});
+
+app.get("/api/notifications", authMiddleware, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM notifications WHERE user_email = ? ORDER BY created_at DESC LIMIT 50",
+      [req.user.email]
+    );
+    res.json({
+      notifications: rows.map((n) => ({
+        id: n.id,
+        title: n.title,
+        desc: n.description,
+        time: n.created_at,
+        read: !!n.read_status,
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load notifications." });
+  }
+});
+
+app.patch("/api/notifications/read-all", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("UPDATE notifications SET read_status = TRUE WHERE user_email = ?", [req.user.email]);
+    res.json({ message: "Notifications marked read." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update notifications." });
   }
 });
 
