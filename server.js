@@ -93,6 +93,7 @@ app.get("/api/forms", authMiddleware, async (req, res) => {
     const forms = await Promise.all(
       rows.map(async (f) => {
         const [responses] = await pool.query("SELECT * FROM responses WHERE form_id = ? ORDER BY submitted_at DESC", [f.id]);
+        const [viewRows] = await pool.query("SELECT COUNT(*) AS count FROM form_views WHERE form_id = ?", [f.id]);
         return {
           id: f.id,
           title: f.title,
@@ -102,6 +103,7 @@ app.get("/api/forms", authMiddleware, async (req, res) => {
           updatedAt: f.updated_at,
           settings: f.settings,
           questions: f.questions,
+          viewCount: viewRows[0].count,
           responses: responses.map((r) => ({
             id: r.id,
             submittedAt: r.submitted_at,
@@ -236,6 +238,19 @@ app.get("/api/forms/:id/public", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to load rack." });
+  }
+});
+
+// --- Public view log: fires once when someone opens the live link ---
+app.post("/api/forms/:id/view", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const viewId = "view_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    await pool.query("INSERT INTO form_views (id, form_id) VALUES (?, ?)", [viewId, id]);
+    res.status(201).json({ message: "View recorded." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to record view." });
   }
 });
 
