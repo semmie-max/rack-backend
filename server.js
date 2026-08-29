@@ -9,17 +9,17 @@ if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET is not set. Refusing to start with an insecure default.");
 }
 
-// --- SendByte email helper ---
+// --- Resend email helper ---
 async function sendEmail(to, subject, html) {
   try {
-    const res = await fetch("https://api.sendbyte.africa/v1/emails", {
+    const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.SENDBYTE_API_KEY}`,
+        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: process.env.SENDBYTE_FROM || "Rack <notifications@rack.io>",
+        from: process.env.RESEND_FROM || "Rack <onboarding@resend.dev>",
         to,
         subject,
         html,
@@ -27,7 +27,7 @@ async function sendEmail(to, subject, html) {
     });
     if (!res.ok) {
       const err = await res.text();
-      console.error("SendByte error:", err);
+      console.error("Resend error:", err);
     }
   } catch (err) {
     console.error("Failed to send email:", err);
@@ -459,6 +459,65 @@ app.patch("/api/notifications/read-all", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to update notifications." });
+  }
+});
+
+app.get("/api/members", authMiddleware, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM members WHERE owner_email = ? ORDER BY created_at ASC",
+      [req.user.email]
+    );
+    const members = [
+      { id: "m_self", name: req.user.email.split("@")[0], email: req.user.email, role: "Admin" },
+      ...rows.map((m) => ({ id: m.id, name: m.member_name, email: m.member_email, role: m.role })),
+    ];
+    res.json({ members });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load members." });
+  }
+});
+
+app.post("/api/invite", authMiddleware, async (req, res) => {
+  try {
+    const { email, role } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required." });
+
+    const memberId = "mem_" + Date.now();
+    await pool.query(
+      "INSERT INTO members (id, owner_email, member_email, member_name, role) VALUES (?, ?, ?, ?, ?)",
+      [memberId, req.user.email, email, email.split("@")[0], role || "Editor"]
+    );
+
+    const frontendUrl = process.env.FRONTEND_URL || "https://semmie-max.github.io";
+    await sendEmail(
+      email,
+      "You've been invited to join a Rack workspace",
+      `
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+          <h2 style="color:#ab1f09;">You're invited!</h2>
+          <p><strong>${req.user.email}</strong> has invited you to join their Rack workspace as a <strong>${role || "Editor"}</strong>.</p>
+          <p style="margin-top:20px;"><a href="${frontendUrl}/signup" style="color:#ab1f09;">Sign up to get started</a></p>
+        </div>
+      `
+    );
+
+    res.status(201).json({ message: "Invite sent.", id: memberId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to send invite." });
+  }
+});
+
+app.delete("/api/members/:id", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query("DELETE FROM members WHERE id = ? AND owner_email = ?", [id, req.user.email]);
+    res.json({ message: "Member removed." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to remove member." });
   }
 });
 
