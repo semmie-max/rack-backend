@@ -69,6 +69,220 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// --- Auth Middleware: protects routes that need a logged-in user ---
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "No token provided." });
+  }
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "defaultsecret");
+    req.user = decoded; // { email }
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
+
+// --- List all racks belonging to the logged-in user ---
+app.get("/api/forms", authMiddleware, async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM forms WHERE user_email = ? ORDER BY updated_at DESC", [req.user.email]);
+
+    const forms = await Promise.all(
+      rows.map(async (f) => {
+        const [responses] = await pool.query("SELECT * FROM responses WHERE form_id = ? ORDER BY submitted_at DESC", [f.id]);
+        return {
+          id: f.id,
+          title: f.title,
+          description: f.description,
+          status: f.status,
+          createdAt: f.created_at,
+          updatedAt: f.updated_at,
+          settings: f.settings,
+          questions: f.questions,
+          responses: responses.map((r) => ({
+            id: r.id,
+            submittedAt: r.submitted_at,
+            email: r.email,
+            answers: r.answers,
+            votedCandidate: r.voted_candidate || undefined,
+            voteCount: r.vote_count || undefined,
+            totalPaid: r.total_paid ? Number(r.total_paid) : undefined,
+            lat: r.lat || undefined,
+            lon: r.lon || undefined,
+          })),
+        };
+      })
+    );
+
+    res.json({ forms });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load racks." });
+  }
+});
+
+// --- Create a brand new rack ---
+app.post("/api/forms", authMiddleware, async (req, res) => {
+  try {
+    const { id, title, description, status, settings, questions } = req.body;
+    if (!id || !title) return res.status(400).json({ error: "id and title are required." });
+
+    await pool.query(
+      "INSERT INTO forms (id, user_email, title, description, status, settings, questions) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, req.user.email, title, description || "", status || "draft", JSON.stringify(settings || {}), JSON.stringify(questions || [])]
+    );
+
+    res.status(201).json({ message: "Rack created." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create rack." });
+  }
+});
+
+// --- Update an existing rack (owner only) ---
+app.put("/api/forms/:id", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, status, settings, questions } = req.body;
+
+    const [existing] = await pool.query("SELECT user_email FROM forms WHERE id = ?", [id]);
+    if (existing.length === 0) return res.status(404).json({ error: "Rack not found." });
+    if (existing[0].user_email !== req.user.email) return res.status(403).json({ error: "Not your rack." });
+
+    await pool.query(
+      "UPDATE forms SET title = ?, description = ?, status = ?, settings = ?, questions = ? WHERE id = ?",
+      [title, description || "", status, JSON.stringify(settings || {}), JSON.stringify(questions || []), id]
+    );
+
+    res.json({ message: "Rack updated." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update rack." });
+  }
+});
+
+// --- Delete a rack (owner only) ---
+app.delete("/api/forms/:id", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [existing] = await pool.query("SELECT user_email FROM forms WHERE id = ?", [id]);
+    if (existing.length === 0) return res.status(404).json({ error: "Rack not found." });
+    if (existing[0].user_email !== req.user.email) return res.status(403).json({ error: "Not your rack." });
+
+    await pool.query("DELETE FROM forms WHERE id = ?", [id]);
+    res.json({ message: "Rack deleted." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete rack." });
+  }
+});
+
+// --- Owner fetch: get one rack even if it's a draft (for editing in the builder) ---
+app.get("/api/forms/:id/edit", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.query("SELECT * FROM forms WHERE id = ?", [id]);
+    if (rows.length === 0) return res.status(404).json({ error: "Rack not found." });
+    if (rows[0].user_email !== req.user.email) return res.status(403).json({ error: "Not your rack." });
+
+    const [responses] = await pool.query("SELECT * FROM responses WHERE form_id = ? ORDER BY submitted_at DESC", [id]);
+    const f = rows[0];
+
+    res.json({
+      id: f.id,
+      title: f.title,
+      description: f.description,
+      status: f.status,
+      createdAt: f.created_at,
+      updatedAt: f.updated_at,
+      settings: f.settings,
+      questions: f.questions,
+      responses: responses.map((r) => ({
+        id: r.id,
+        submittedAt: r.submitted_at,
+        email: r.email,
+        answers: r.answers,
+        votedCandidate: r.voted_candidate || undefined,
+        voteCount: r.vote_count || undefined,
+        totalPaid: r.total_paid ? Number(r.total_paid) : undefined,
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load rack." });
+  }
+});
+
+// --- Public fetch: anyone with the link can view (no auth needed) ---
+app.get("/api/forms/:id/public", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.query("SELECT * FROM forms WHERE id = ?", [id]);
+    if (rows.length === 0) return res.status(404).json({ found: false });
+
+    const f = rows[0];
+    res.json({
+      found: true,
+      id: f.id,
+      title: f.title,
+      description: f.description,
+      status: f.status,
+      settings: f.settings,
+      questions: f.questions,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load rack." });
+  }
+});
+
+// --- Public submit: anyone with the link can submit a response ---
+app.post("/api/forms/:id/responses", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email, answers, votedCandidate, voteCount, totalPaid, lat, lon } = req.body;
+
+    const [rows] = await pool.query("SELECT * FROM forms WHERE id = ?", [id]);
+    if (rows.length === 0) return res.status(404).json({ error: "Rack not found." });
+
+    const form = rows[0];
+    if (form.status !== "published" || !form.settings?.acceptingResponses) {
+      return res.status(403).json({ error: "This rack is not accepting responses." });
+    }
+
+    // If this was a paid-voting submission, bump the candidate's vote count inside the questions JSON
+    let questions = form.questions;
+    if (votedCandidate) {
+      questions = questions.map((q) => {
+        if (q.type === "paid_voting" && q.candidates) {
+          return {
+            ...q,
+            candidates: q.candidates.map((c) =>
+              c.name === votedCandidate ? { ...c, votes: c.votes + (voteCount || 1) } : c
+            ),
+          };
+        }
+        return q;
+      });
+      await pool.query("UPDATE forms SET questions = ? WHERE id = ?", [JSON.stringify(questions), id]);
+    }
+
+    const responseId = "resp_" + Date.now();
+    await pool.query(
+      "INSERT INTO responses (id, form_id, email, answers, voted_candidate, vote_count, total_paid, lat, lon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [responseId, id, email || "Anonymous", JSON.stringify(answers || {}), votedCandidate || null, voteCount || null, totalPaid || null, lat || null, lon || null]
+    );
+
+    res.status(201).json({ message: "Response recorded." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to submit response." });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Rack backend running on port ${PORT}`);
