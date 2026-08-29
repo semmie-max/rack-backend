@@ -36,7 +36,18 @@ async function sendEmail(to, subject, html) {
 
 const app = express();
 app.use(cors());
+app.use(express.json());const app = express();
+app.use(cors());
 app.use(express.json());
+
+function slugify(text) {
+  return text
+    .toString()
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 // Root test route
 app.get("/", (req, res) => {
@@ -125,6 +136,7 @@ app.get("/api/forms", authMiddleware, async (req, res) => {
         const [viewRows] = await pool.query("SELECT COUNT(*) AS count FROM form_views WHERE form_id = ?", [f.id]);
         return {
           id: f.id,
+          slug: f.slug,
           title: f.title,
           description: f.description,
           status: f.status,
@@ -161,12 +173,18 @@ app.post("/api/forms", authMiddleware, async (req, res) => {
     const { id, title, description, status, settings, questions } = req.body;
     if (!id || !title) return res.status(400).json({ error: "id and title are required." });
 
+    let slug = slugify(title) || "form";
+    const [existingSlug] = await pool.query("SELECT id FROM forms WHERE slug = ?", [slug]);
+    if (existingSlug.length > 0) {
+      slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+    }
+
     await pool.query(
-      "INSERT INTO forms (id, user_email, title, description, status, settings, questions) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [id, req.user.email, title, description || "", status || "draft", JSON.stringify(settings || {}), JSON.stringify(questions || [])]
+      "INSERT INTO forms (id, user_email, title, description, status, settings, questions, slug) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, req.user.email, title, description || "", status || "draft", JSON.stringify(settings || {}), JSON.stringify(questions || []), slug]
     );
 
-    res.status(201).json({ message: "Rack created." });
+    res.status(201).json({ message: "Rack created.", slug });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create rack." });
@@ -224,6 +242,7 @@ app.get("/api/forms/:id/edit", authMiddleware, async (req, res) => {
 
     res.json({
       id: f.id,
+      slug: f.slug,
       title: f.title,
       description: f.description,
       status: f.status,
@@ -258,6 +277,30 @@ app.get("/api/forms/:id/public", async (req, res) => {
     res.json({
       found: true,
       id: f.id,
+      title: f.title,
+      description: f.description,
+      status: f.status,
+      settings: f.settings,
+      questions: f.questions,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load rack." });
+  }
+});
+
+// --- Public fetch by slug: for the /form/:slug clean-URL links ---
+app.get("/api/forms/slug/:slug/public", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const [rows] = await pool.query("SELECT * FROM forms WHERE slug = ?", [slug]);
+    if (rows.length === 0) return res.status(404).json({ found: false });
+
+    const f = rows[0];
+    res.json({
+      found: true,
+      id: f.id,
+      slug: f.slug,
       title: f.title,
       description: f.description,
       status: f.status,
