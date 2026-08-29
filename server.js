@@ -5,6 +5,10 @@ const jwt = require("jsonwebtoken");
 const pool = require("./db");
 require("dotenv").config();
 
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET is not set. Refusing to start with an insecure default.");
+}
+
 // --- SendByte email helper ---
 async function sendEmail(to, subject, html) {
   try {
@@ -60,7 +64,7 @@ app.post("/api/signup", async (req, res) => {
       [email, hashedPassword]
     );
 
-    const token = jwt.sign({ email }, process.env.JWT_SECRET || "defaultsecret", { expiresIn: "7d" });
+    const token = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
     res.status(201).json({ message: "Account created.", token });
   } catch (err) {
@@ -85,7 +89,7 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid email or password." });
     }
 
-    const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET || "defaultsecret", { expiresIn: "7d" });
+    const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
     res.json({ message: "Login successful.", token });
   } catch (err) {
@@ -102,7 +106,7 @@ function authMiddleware(req, res, next) {
   }
   const token = authHeader.split(" ")[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "defaultsecret");
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded; // { email }
     next();
   } catch (err) {
