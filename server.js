@@ -5,6 +5,31 @@ const jwt = require("jsonwebtoken");
 const pool = require("./db");
 require("dotenv").config();
 
+// --- SendByte email helper ---
+async function sendEmail(to, subject, html) {
+  try {
+    const res = await fetch("https://api.sendbyte.africa/v1/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.SENDBYTE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: process.env.SENDBYTE_FROM || "Rack <notifications@rack.io>",
+        to,
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("SendByte error:", err);
+    }
+  } catch (err) {
+    console.error("Failed to send email:", err);
+  }
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -292,6 +317,51 @@ app.post("/api/forms/:id/responses", async (req, res) => {
     );
 
     res.status(201).json({ message: "Response recorded." });
+
+    // --- Fire and forget emails, don't block the response ---
+    const answerRows = Object.entries(answers || {})
+      .map(([qId, val]) => {
+        const q = (questions || []).find((qq) => qq.id === qId);
+        const label = q ? q.title : qId;
+        const value = Array.isArray(val) ? val.join(", ") : val;
+        return `<tr><td style="padding:6px 0;color:#888;font-size:13px;">${label}</td><td style="padding:6px 0;font-size:13px;">${value}</td></tr>`;
+      })
+      .join("");
+
+    // Email 1: to the creator, notifying them of the new submission
+    sendEmail(
+      form.user_email,
+      `New response on "${form.title}"`,
+      `
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+          <h2 style="color:#ab1f09;">New Submission Received</h2>
+          <p>Your rack <strong>${form.title}</strong> just received a new response.</p>
+          <p><strong>From:</strong> ${email || "Anonymous"}</p>
+          ${votedCandidate ? `<p><strong>Voted for:</strong> ${votedCandidate} (${voteCount || 1} votes)</p>` : ""}
+          ${totalPaid ? `<p><strong>Amount paid:</strong> $${Number(totalPaid).toFixed(2)}</p>` : ""}
+          <table style="width:100%;border-collapse:collapse;margin-top:12px;">${answerRows}</table>
+          <p style="margin-top:20px;font-size:12px;color:#888;">View all responses in your Rack dashboard.</p>
+        </div>
+      `
+    );
+
+    // Email 2: to the person who filled the form, confirming their submission
+    if (email && email !== "Anonymous") {
+      sendEmail(
+        email,
+        `Your response to "${form.title}" was received`,
+        `
+          <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
+            <h2 style="color:#ab1f09;">Thanks for filling this out!</h2>
+            <p>Here's a copy of what you submitted to <strong>${form.title}</strong>.</p>
+            ${votedCandidate ? `<p><strong>You voted for:</strong> ${votedCandidate} (${voteCount || 1} votes)</p>` : ""}
+            ${totalPaid ? `<p><strong>Amount paid:</strong> $${Number(totalPaid).toFixed(2)}</p>` : ""}
+            <table style="width:100%;border-collapse:collapse;margin-top:12px;">${answerRows}</table>
+            <p style="margin-top:20px;font-size:13px;color:#555;">${form.settings?.confirmationMessage || "Thank you for your submission."}</p>
+          </div>
+        `
+      );
+    }
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to submit response." });
